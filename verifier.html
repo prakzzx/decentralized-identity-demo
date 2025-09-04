@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Verifier — Decentralized Identity Demo</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="container">
+<h1>Decentralized Identity — Verifier</h1>
+<p class="muted">Scan the QR or paste the payload to verify the signature and view disclosed claims.</p>
+
+
+<section class="card">
+<h2>1) Scan QR (Camera)</h2>
+<div class="row">
+<button id="btnStartCam">Start Camera</button>
+<button id="btnStopCam" class="ghost">Stop</button>
+</div>
+<video id="video" playsinline></video>
+<canvas id="canvas" class="hide"></canvas>
+<p class="muted small">Permission prompt will appear. If it fails, use Paste instead.</p>
+</section>
+
+
+<section class="card">
+<h2>2) Or Paste Payload</h2>
+<textarea id="pasteIn" rows="4" placeholder="Paste the presentation token (header.payload.signature)"></textarea>
+<div class="row">
+<button id="btnVerifyPaste">Verify</button>
+</div>
+</section>
+
+
+<section class="card">
+<h2>Result</h2>
+<pre id="result" class="mono small"></pre>
+</section>
+
+<footer>
+<a href="index.html">◀ Back to Wallet</a>
+</footer>
+</div>
+
+
+<script src="jsQR.min.js"></script>
+<script src="util.js"></script>
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const result = document.getElementById('result');
+const pasteIn = document.getElementById('pasteIn');
+
+
+let stream = null; let rafId = null;
+
+
+function show(obj) { result.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
+
+
+async function verifyToken(token) {
+try {
+const [hB64, pB64, sB64] = token.split('.');
+if (!hB64 || !pB64 || !sB64) throw new Error('Malformed token');
+const header = JSON.parse(utf8(base64urlToBytes(hB64)));
+const payload = JSON.parse(utf8(base64urlToBytes(pB64)));
+const sigBytes = base64urlToBytes(sB64);
+const pubJwk = payload.pub; // embedded public key
+if (!pubJwk) throw new Error('No public key in payload');
+const pubKey = await crypto.subtle.importKey('jwk', pubJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pubKey, sigBytes, new TextEncoder().encode(`${hB64}.${pB64}`));
+if (!ok) throw new Error('Signature verification failed');
+show({ verified: true, disclosed: payload.presentation, issuer: payload.iss, issuedAt: payload.iat });
+} catch (e) {
+show({ verified: false, error: e.message });
+}
+}
+
+document.getElementById('btnVerifyPaste').onclick = () => {
+const t = pasteIn.value.trim();
+if (!t) return show('Paste a token first.');
+verifyToken(t);
+};
+
+
+document.getElementById('btnStartCam').onclick = async () => {
+try {
+stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+video.srcObject = stream; await video.play();
+tick();
+} catch (e) {
+show('Camera error: ' + e.message);
+}
+};
+
+
+document.getElementById('btnStopCam').onclick = () => {
+if (rafId) cancelAnimationFrame(rafId);
+if (stream) stream.getTracks().forEach(t => t.stop());
+stream = null; show('Camera stopped.');
+};
+
+
+function tick() {
+if (!video.videoWidth) { rafId = requestAnimationFrame(tick); return; }
+canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+const code = jsQR(imgData.data, imgData.width, imgData.height);
+if (code && code.data) {
+verifyToken(code.data);
+}
+rafId = requestAnimationFrame(tick);
+}
+</script>
+</body>
+</html>
+

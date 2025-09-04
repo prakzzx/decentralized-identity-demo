@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wallet — Decentralized Identity Demo</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="container">
+<h1>Decentralized Identity — Wallet</h1>
+<p class="muted">All keys and data stay in your browser (localStorage). No server.
+</p>
+
+
+<section class="card">
+<h2>1) Generate / Load Keys</h2>
+<p>
+This demo uses <strong>ECDSA P-256</strong> with SHA-256 via WebCrypto.
+</p>
+<div class="row">
+<button id="btnGenKeys">Generate New Keypair</button>
+<button id="btnLoadKeys">Load Saved Keypair</button>
+<button id="btnExportPub">Copy Public Key (JWK)</button>
+</div>
+<pre id="pubkeyOut" class="mono small"></pre>
+<p class="muted">Your DID (demo): <code id="didOut">(none)</code></p>
+</section>
+
+<section class="card">
+<h2>2) Issue Credential (locally)</h2>
+<div class="grid">
+<label>Name<br /><input id="credName" placeholder="e.g., Prakati N" /></label>
+<label>Email<br /><input id="credEmail" placeholder="e.g., prakati@example.com" /></label>
+<label>ID Number<br /><input id="credId" placeholder="e.g., IT-2026-1234" /></label>
+</div>
+<div class="row">
+<button id="btnIssue">Create & Sign Credential</button>
+<button id="btnViewVC">View Saved Credential</button>
+<button id="btnClearVC" class="ghost">Clear Credential</button>
+</div>
+<pre id="vcOut" class="mono small"></pre>
+</section>
+
+
+<section class="card">
+<h2>3) Selective Disclosure → Present</h2>
+<p>Select which fields to reveal. The wallet will pack only the checked claims and sign the presentation.
+</p>
+<div class="checks">
+<label><input type="checkbox" id="sd_name" checked /> Name</label>
+<label><input type="checkbox" id="sd_email" checked /> Email</label>
+<label><input type="checkbox" id="sd_id" checked /> ID Number</label>
+</div>
+<div class="row">
+<button id="btnPresent">Create Presentation (Signed)</button>
+<button id="btnCopyJWT" class="ghost">Copy Payload</button>
+</div>
+<pre id="jwtOut" class="mono small"></pre>
+
+
+<div class="qrWrap">
+<div id="qrcode"></div>
+</div>
+<p class="muted small">Tip: Open <a href="verifier.html" target="_blank">verifier</a> on another device/window to scan the QR.</p>
+</section>
+
+<footer>
+<a href="verifier.html">Go to Verifier ▶</a>
+</footer>
+</div>
+
+
+<script src="qrcode.min.js"></script>
+<script src="util.js"></script>
+<script>
+const LS_KEYS = {
+PRIVATE: 'did_demo_priv_jwk',
+PUBLIC: 'did_demo_pub_jwk',
+VC: 'did_demo_vc'
+};
+
+
+const btnGenKeys = document.getElementById('btnGenKeys');
+const btnLoadKeys = document.getElementById('btnLoadKeys');
+const btnExportPub = document.getElementById('btnExportPub');
+const pubkeyOut = document.getElementById('pubkeyOut');
+const didOut = document.getElementById('didOut');
+
+
+const credName = document.getElementById('credName');
+const credEmail = document.getElementById('credEmail');
+const credId = document.getElementById('credId');
+const btnIssue = document.getElementById('btnIssue');
+const btnViewVC = document.getElementById('btnViewVC');
+const btnClearVC = document.getElementById('btnClearVC');
+const vcOut = document.getElementById('vcOut');
+
+
+const sd_name = document.getElementById('sd_name');
+const sd_email = document.getElementById('sd_email');
+const sd_id = document.getElementById('sd_id');
+const btnPresent = document.getElementById('btnPresent');
+const btnCopyJWT = document.getElementById('btnCopyJWT');
+const jwtOut = document.getElementById('jwtOut');
+
+
+const qrDiv = document.getElementById('qrcode');
+let qrInstance = null;
+
+function setDIDFromPubJWK(pubJwk) {
+// Simple DID string using SHA-256 thumbprint of JWK
+// (educational only; not a real did:key)
+const canon = JSON.stringify({ crv: pubJwk.crv, kty: pubJwk.kty, x: pubJwk.x, y: pubJwk.y });
+return crypto.subtle.digest('SHA-256', new TextEncoder().encode(canon)).then(buf => {
+const thumb = base64url( new Uint8Array(buf) );
+const did = `did:demo:${thumb.slice(0, 32)}`;
+didOut.textContent = did;
+});
+}
+
+
+async function showSavedPubKey() {
+const pub = localStorage.getItem(LS_KEYS.PUBLIC);
+if (!pub) {
+pubkeyOut.textContent = 'No public key found in localStorage.';
+didOut.textContent = '(none)';
+return;
+}
+const jwk = JSON.parse(pub);
+pubkeyOut.textContent = JSON.stringify(jwk, null, 2);
+await setDIDFromPubJWK(jwk);
+}
+
+
+btnGenKeys.onclick = async () => {
+const { publicKey, privateKey } = await crypto.subtle.generateKey(
+{ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']
+);
+const pubJwk = await crypto.subtle.exportKey('jwk', publicKey);
+const privJwk = await crypto.subtle.exportKey('jwk', privateKey);
+localStorage.setItem(LS_KEYS.PUBLIC, JSON.stringify(pubJwk));
+localStorage.setItem(LS_KEYS.PRIVATE, JSON.stringify(privJwk));
+showSavedPubKey();
+alert('New keypair generated and saved to localStorage.');
+};
+
+btnLoadKeys.onclick = showSavedPubKey;
+
+
+btnExportPub.onclick = async () => {
+const pub = localStorage.getItem(LS_KEYS.PUBLIC);
+if (!pub) return alert('No saved public key. Click "Generate New Keypair" first.');
+await navigator.clipboard.writeText(pub);
+alert('Public key JWK copied to clipboard.');
+};
+
+
+btnIssue.onclick = async () => {
+const name = credName.value.trim();
+const email = credEmail.value.trim();
+const idnum = credId.value.trim();
+if (!name || !email || !idnum) return alert('Please fill all fields.');
+
+
+const pubJwkStr = localStorage.getItem(LS_KEYS.PUBLIC);
+const privJwkStr = localStorage.getItem(LS_KEYS.PRIVATE);
+if (!pubJwkStr || !privJwkStr) return alert('Generate/load a keypair first.');
+
+
+const now = new Date().toISOString();
+const vc = {
+'@context': ['https://www.w3.org/2018/credentials/v1'],
+type: ['VerifiableCredential'],
+issuer: didOut.textContent || 'did:demo:unknown',
+issuanceDate: now,
+credentialSubject: { name, email, id: idnum }
+};
+
+
+// Sign the credential JSON (compact JWS-like)
+const header = { alg: 'ES256', typ: 'JWT' };
+const payload = { vc };
+
+
+const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(payload))}`;
+const privKey = await crypto.subtle.importKey('jwk', JSON.parse(privJwkStr), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+const sigBuf = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privKey, new TextEncoder().encode(signingInput));
+const jws = `${signingInput}.${base64url(new Uint8Array(sigBuf))}`;
+
+
+localStorage.setItem(LS_KEYS.VC, JSON.stringify({ jws, pub: JSON.parse(pubJwkStr) }));
+vcOut.textContent = JSON.stringify({ jws, pub: JSON.parse(pubJwkStr) }, null, 2);
+alert('Credential created and saved locally.');
+};
+
+btnViewVC.onclick = () => {
+const stored = localStorage.getItem(LS_KEYS.VC);
+vcOut.textContent = stored ? JSON.stringify(JSON.parse(stored), null, 2) : 'No credential stored.';
+};
+
+
+btnClearVC.onclick = () => {
+localStorage.removeItem(LS_KEYS.VC);
+vcOut.textContent = 'Cleared.';
+};
+
+
+btnPresent.onclick = async () => {
+const stored = localStorage.getItem(LS_KEYS.VC);
+if (!stored) return alert('No credential to present. Click "Create & Sign Credential" first.');
+const { jws, pub } = JSON.parse(stored);
+
+
+// Decode the stored JWS to get the VC
+const [hB64, pB64] = jws.split('.');
+const payload = JSON.parse(utf8(base64urlToBytes(pB64)));
+const subj = payload.vc.credentialSubject;
+
+
+// Build a selective disclosure object
+const disclose = {};
+if (sd_name.checked) disclose.name = subj.name;
+if (sd_email.checked) disclose.email = subj.email;
+if (sd_id.checked) disclose.id = subj.id;
+
+
+const pres = {
+iss: didOut.textContent || 'did:demo:unknown',
+iat: Math.floor(Date.now()/1000),
+presentation: disclose,
+// include public key so verifier can verify without registry
+pub
+};
+
+
+const header = { alg: 'ES256', typ: 'JWT' };
+const signingInput = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(pres))}`;
+
+
+const privJwkStr = localStorage.getItem(LS_KEYS.PRIVATE);
+const privKey = await crypto.subtle.importKey('jwk', JSON.parse(privJwkStr), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+const sigBuf = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privKey, new TextEncoder().encode(signingInput));
+const vp = `${signingInput}.${base64url(new Uint8Array(sigBuf))}`;
+
+
+jwtOut.textContent = vp;
+
+// Render QR
+if (!qrInstance) {
+qrInstance = new QRCode(qrDiv, {
+text: vp,
+width: 220,
+height: 220,
+correctLevel: QRCode.CorrectLevel.M
+});
+} else {
+qrInstance.clear();
+qrInstance.makeCode(vp);
+}
+};
+
+
+btnCopyJWT.onclick = async () => {
+const txt = jwtOut.textContent.trim();
+if (!txt) return alert('No payload to copy. Click "Create Presentation" first.');
+await navigator.clipboard.writeText(txt);
+alert('Presentation payload copied to clipboard.');
+};
+
+
+// Init
+showSavedPubKey();
+</script>
+</body>
+</html>
